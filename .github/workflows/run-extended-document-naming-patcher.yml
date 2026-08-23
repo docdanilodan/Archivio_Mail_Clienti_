@@ -1,0 +1,29 @@
+name: Run extended FinancePlus document naming patcher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/run-extended-document-naming-patcher.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply extended naming rules
+        run: python .github/scripts/extend_document_ai_rules.py
+      - name: Verify Python syntax
+        run: python -m py_compile mail_attachment_extractor/document_ai.py
+      - name: Commit changes
+        shell: bash
+        run: |
+          git config user.name "FinancePlus Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add mail_attachment_extractor/document_ai.py
+          git diff --cached --quiet && exit 0
+          git commit -m "Extend AI naming to CV invoices finance contracts CR and drafts"
+          git push
