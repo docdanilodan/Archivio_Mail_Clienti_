@@ -12,6 +12,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 import mail_attachment_extractor as core
+from document_ai import render_document_ai
 
 PART_RE = re.compile(r"^(?P<base>.+)\.part(?P<num>\d{4,})$", re.IGNORECASE)
 SUPPORTED = {".mbox", ".zip", ".eml", ".msg"}
@@ -641,6 +642,8 @@ def main():
                         bar.empty()
 
     render_results(st.session_state.get("mails", []), st.session_state.get("warns", []))
+
+    render_document_ai()
 
 
 if __name__ == "__main__":
