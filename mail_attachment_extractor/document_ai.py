@@ -195,6 +195,36 @@ def _is_visura_camerale(result: dict) -> bool:
     return any(x in text for x in indicators)
 
 
+def _is_bilancio_esercizio(result: dict) -> bool:
+    haystack = " ".join(
+        str(result.get(k, "") or "")
+        for k in ("document_type", "summary", "preview", "reason")
+    )
+    text = _normalized(haystack)
+    return (
+        "bilancio di esercizio" in text
+        or "bilancio d esercizio" in text
+        or ("stato patrimoniale" in text and "conto economico" in text)
+    )
+
+
+def _document_year(result: dict) -> str:
+    sources = [
+        result.get("document_year", ""),
+        result.get("document_date", ""),
+        result.get("summary", ""),
+        result.get("preview", ""),
+    ]
+    for source in sources:
+        match = re.search(r"\b((?:19|20)\d{2})\b", str(source or ""))
+        if match:
+            return match.group(1)
+    return _field_value(
+        result,
+        {"anno", "anno esercizio", "esercizio", "data bilancio", "data chiusura esercizio"},
+    )
+
+
 def _company_name(result: dict) -> str:
     direct = str(result.get("company_name", "") or "").strip()
     if direct:
@@ -228,6 +258,24 @@ def _apply_priority_naming_rules(result: dict, original_name: str) -> dict:
                 "Regola FinancePlus prioritaria: documento riconosciuto come Visura Camerale; "
                 "usa la denominazione ufficiale dell'impresa presente nella visura."
             )
+    elif _is_bilancio_esercizio(result):
+        company = _company_name(result)
+        year = _document_year(result)
+        result["document_type"] = "Bilancio d’esercizio"
+        if company:
+            result["company_name"] = company
+        if year:
+            result["document_year"] = year
+        if company and year:
+            result["suggested_filename"] = _safe_filename(
+                f"{company}_Bilancio d’esercizio {year}",
+                original_name,
+            )
+            result["naming_rule"] = "NOME AZIENDA_Bilancio d’esercizio ANNO"
+            result["reason"] = (
+                "Regola FinancePlus prioritaria: documento riconosciuto come Bilancio d’esercizio; "
+                "usa la denominazione ufficiale dell’azienda e l’anno di esercizio presenti nel documento."
+            )
     return result
 
 
@@ -255,6 +303,15 @@ REGOLA FINANCEPLUS PRIORITARIA — VISURA CAMERALE:
 - Per una Visura Camerale NON aggiungere data, codice fiscale, REA, città o altri dettagli al nome.
 - Questa regola ha priorità sulle convenzioni apprese e sulla convenzione generica di denominazione.
 
+REGOLA FINANCEPLUS PRIORITARIA — BILANCIO D’ESERCIZIO:
+- Se il documento è un Bilancio di esercizio, un fascicolo di bilancio con Stato patrimoniale/Conto economico/Nota integrativa o documento equivalente, imposta document_type esattamente a "Bilancio d’esercizio".
+- Trova la DENOMINAZIONE UFFICIALE DELL’AZIENDA nella prima pagina o nell’intestazione del bilancio e inseriscila in company_name senza abbreviazioni inventate.
+- Ricava l’ANNO DI ESERCIZIO dalla dicitura del documento, ad esempio "Bilancio di esercizio al 31-12-2023" deve produrre document_year = "2023".
+- Il nome suggerito DEVE essere esattamente: NOME AZIENDA_Bilancio d’esercizio ANNO + estensione originale.
+- Esempio di forma: SCHIANO S.R.L._Bilancio d’esercizio 2023.pdf
+- NON aggiungere al nome data completa, codice fiscale, REA, città, utile/perdita o altri dettagli.
+- Questa regola ha priorità sulle convenzioni apprese e sulla convenzione generica di denominazione, ma viene dopo la regola specifica Visura Camerale.
+
 Nome originale: {filename}
 Convenzioni già accettate dall'utente:
 {_learning_prompt()}
@@ -267,6 +324,7 @@ Rispondi esattamente con questo schema:
   "document_type": "string",
   "company_name": "string",
   "document_date": "string",
+  "document_year": "string",
   "confidence": 0.0,
   "summary": "string",
   "preview": "string",
@@ -345,8 +403,8 @@ def render_document_ai() -> None:
         "Quando correggi e confermi il nome, la convenzione viene memorizzata e riutilizzata nelle analisi successive."
     )
     st.info(
-        "Regola automatica attiva: le Visure Camerali vengono denominate "
-        "NOME AZIENDA_Visura Camerale, usando la denominazione ufficiale trovata nel documento."
+        "Regole automatiche attive: Visure Camerali → NOME AZIENDA_Visura Camerale; "
+        "Bilanci d’esercizio → NOME AZIENDA_Bilancio d’esercizio ANNO."
     )
 
     try:
