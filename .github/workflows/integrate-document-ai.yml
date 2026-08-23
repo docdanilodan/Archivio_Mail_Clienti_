@@ -1,0 +1,78 @@
+name: Integrate FinancePlus Document AI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/integrate-document-ai.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Integrate module into main Streamlit screen
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          app_path = Path("mail_attachment_extractor/app.py")
+          text = app_path.read_text(encoding="utf-8")
+
+          import_line = "from document_ai import render_document_ai"
+          anchor_import = "import mail_attachment_extractor as core"
+          if import_line not in text:
+              if anchor_import not in text:
+                  raise SystemExit("Import anchor not found in app.py")
+              text = text.replace(
+                  anchor_import,
+                  anchor_import + "\n" + import_line,
+                  1,
+              )
+
+          call_line = "    render_document_ai()"
+          anchor_call = '    render_results(st.session_state.get("mails", []), st.session_state.get("warns", []))'
+          if call_line not in text:
+              if anchor_call not in text:
+                  raise SystemExit("Render anchor not found in app.py")
+              text = text.replace(
+                  anchor_call,
+                  anchor_call + "\n\n" + call_line,
+                  1,
+              )
+
+          app_path.write_text(text, encoding="utf-8")
+
+          requirements = Path("mail_attachment_extractor/requirements.txt")
+          lines = requirements.read_text(encoding="utf-8").splitlines()
+          if not any(line.strip().lower().startswith("openai") for line in lines):
+              lines.append("openai>=1.70.0")
+              requirements.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - name: Validate Python syntax
+        run: |
+          python -m py_compile \
+            mail_attachment_extractor/app.py \
+            mail_attachment_extractor/document_ai.py \
+            mail_attachment_extractor/pages/3_Riconoscimento_IA_Documenti.py
+
+      - name: Commit integration
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No integration changes required."
+            exit 0
+          fi
+          git config user.name "FinancePlus Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add mail_attachment_extractor/app.py mail_attachment_extractor/requirements.txt
+          git commit -m "Integrate Document AI as screen 3"
+          git push
