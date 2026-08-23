@@ -36,6 +36,25 @@ SEED_EXAMPLES: list[dict] = [
     {
         "source": "FinancePlus seed",
         "timestamp": "2026-08-23T00:00:00+00:00",
+        "original_name": "RICEVUTA BILANCIO 2023_SCHIANO SRL.pdf",
+        "document_type": "Ricevuta deposito Bilancio d’esercizio",
+        "company_name": "SCHIANO S.R.L.",
+        "document_year": "2023",
+        "document_date": "22/02/2025",
+        "accepted_name": "SCHIANO S.R.L._Ricevuta deposito Bilancio d’esercizio 2023.pdf",
+        "naming_template": "{company_name}_Ricevuta deposito Bilancio d’esercizio {document_year}{extension}",
+        "signature_terms": [
+            "ricevuta", "presentazione", "telematica", "registro", "imprese", "deposito",
+            "bilancio", "atti", "presentati", "protocollo", "diritti", "bollo"
+        ],
+        "field_labels": [
+            "denominazione", "data atto", "anno esercizio", "data domanda",
+            "data protocollo", "numero rea", "codice fiscale"
+        ],
+    },
+    {
+        "source": "FinancePlus seed",
+        "timestamp": "2026-08-23T00:00:00+00:00",
         "original_name": "BILANCIO 2023_SCHIANO SRL.pdf",
         "document_type": "Bilancio d’esercizio",
         "company_name": "SCHIANO S.R.L.",

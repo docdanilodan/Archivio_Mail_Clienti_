@@ -178,6 +178,58 @@ def _field_value(result: dict, labels: set[str]) -> str:
     return ""
 
 
+def _is_ricevuta_deposito_bilancio(result: dict) -> bool:
+    haystack = " ".join(
+        str(result.get(k, "") or "")
+        for k in ("document_type", "summary", "preview", "reason")
+    )
+    text = _normalized(haystack)
+    strong_indicators = (
+        "ricevuta dell avvenuta presentazione",
+        "ricevuta deposito bilancio",
+        "deposito bilancio",
+        "elenco degli atti presentati",
+        "presentazione via telematica",
+    )
+    has_receipt = any(x in text for x in strong_indicators)
+    has_balance = (
+        "bilancio" in text
+        and ("esercizio" in text or "deposito" in text or "atto" in text)
+    )
+    return has_receipt and has_balance
+
+
+def _receipt_bilancio_year(result: dict) -> str:
+    direct = str(result.get("document_year", "") or "").strip()
+    if re.fullmatch(r"(?:19|20)\d{2}", direct):
+        return direct
+
+    value = _field_value(
+        result,
+        {
+            "anno bilancio", "anno esercizio", "esercizio", "data atto",
+            "dt atto", "data chiusura esercizio", "bilancio esercizio"
+        },
+    )
+    match = re.search(r"\b((?:19|20)\d{2})\b", value)
+    if match:
+        return match.group(1)
+
+    sources = [result.get("preview", ""), result.get("summary", ""), result.get("reason", "")]
+    patterns = (
+        r"bilancio(?:\s+abbreviato)?\s+(?:d[’']?esercizio|di esercizio).*?((?:19|20)\d{2})",
+        r"(?:dt\.?\s*atto|data\s*atto)\s*[:=-]?\s*\d{1,2}[/-]\d{1,2}[/-]((?:19|20)\d{2})",
+        r"esercizio.*?((?:19|20)\d{2})",
+    )
+    for source in sources:
+        normalized_source = _normalized(source)
+        for pattern in patterns:
+            match = re.search(pattern, normalized_source, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+    return ""
+
+
 def _is_visura_camerale(result: dict) -> bool:
     haystack = " ".join(
         str(result.get(k, "") or "")
@@ -244,7 +296,25 @@ def _company_name(result: dict) -> str:
 
 
 def _apply_priority_naming_rules(result: dict, original_name: str) -> dict:
-    if _is_visura_camerale(result):
+    if _is_ricevuta_deposito_bilancio(result):
+        company = _company_name(result)
+        year = _receipt_bilancio_year(result)
+        result["document_type"] = "Ricevuta deposito Bilancio d’esercizio"
+        if company:
+            result["company_name"] = company
+        if year:
+            result["document_year"] = year
+        if company and year:
+            result["suggested_filename"] = _safe_filename(
+                f"{company}_Ricevuta deposito Bilancio d’esercizio {year}",
+                original_name,
+            )
+            result["naming_rule"] = "NOME AZIENDA_Ricevuta deposito Bilancio d’esercizio ANNO"
+            result["reason"] = (
+                "Regola FinancePlus prioritaria: documento riconosciuto come ricevuta di deposito del bilancio; "
+                "usa la denominazione dell’impresa e l’anno dell’esercizio depositato, non l’anno del protocollo."
+            )
+    elif _is_visura_camerale(result):
         company = _company_name(result)
         result["document_type"] = "Visura Camerale"
         if company:
@@ -293,6 +363,17 @@ Devi:
 4. produrre una breve anteprima leggibile;
 5. suggerire un nome file professionale;
 6. applicare, quando pertinenti, le convenzioni apprese dalle correzioni precedenti.
+
+REGOLA FINANCEPLUS PRIORITARIA — RICEVUTA DEPOSITO BILANCIO:
+- Questa regola deve essere verificata PRIMA della Visura Camerale e del Bilancio d’esercizio.
+- Se il documento è una ricevuta/ricevuta telematica della Camera di Commercio o Registro Imprese relativa alla presentazione/deposito di un bilancio, imposta document_type esattamente a "Ricevuta deposito Bilancio d’esercizio".
+- Elementi tipici: "Ricevuta dell’avvenuta presentazione", "presentazione via telematica", "Elenco degli atti presentati", "Deposito bilancio", protocollo, diritti di segreteria o bollo.
+- Trova la DENOMINAZIONE UFFICIALE DELL’IMPRESA indicata nella ricevuta e inseriscila in company_name.
+- Ricava document_year dall’ANNO DEL BILANCIO/ESERCIZIO DEPOSITATO, non dalla data della domanda, protocollo, ricevuta o firma.
+- Esempio: ricevuta datata 22/02/2025 con atto "Bilancio abbreviato d’esercizio" e DT.ATTO 31/12/2023 => document_year = "2023".
+- Il nome suggerito DEVE essere esattamente: NOME AZIENDA_Ricevuta deposito Bilancio d’esercizio ANNO + estensione originale.
+- Esempio: SCHIANO S.R.L._Ricevuta deposito Bilancio d’esercizio 2023.pdf
+- NON aggiungere data protocollo, numero protocollo, REA, codice fiscale, importi di bollo/diritti o altri dettagli.
 
 REGOLA FINANCEPLUS PRIORITARIA — VISURA CAMERALE:
 - Se il documento è una Visura Camerale, Visura ordinaria, Visura storica o altro documento di visura del Registro Imprese/CCIAA, imposta document_type esattamente a "Visura Camerale".
@@ -403,7 +484,8 @@ def render_document_ai() -> None:
         "Quando correggi e confermi il nome, la convenzione viene memorizzata e riutilizzata nelle analisi successive."
     )
     st.info(
-        "Regole automatiche attive: Visure Camerali → NOME AZIENDA_Visura Camerale; "
+        "Regole automatiche attive: Ricevute deposito bilancio → NOME AZIENDA_Ricevuta deposito Bilancio d’esercizio ANNO; "
+        "Visure Camerali → NOME AZIENDA_Visura Camerale; "
         "Bilanci d’esercizio → NOME AZIENDA_Bilancio d’esercizio ANNO."
     )
 
