@@ -80,6 +80,7 @@ def add_learning_example(original_name: str, suggested_name: str, accepted_name:
         "suggested_name": suggested_name,
         "accepted_name": accepted_name,
         "document_type": result.get("document_type", ""),
+        "company_name": result.get("company_name", ""),
         "summary": str(result.get("summary", ""))[:800],
         "key_fields": result.get("key_fields", [])[:15],
     })
@@ -130,6 +131,7 @@ def _learning_prompt() -> str:
         {
             "originale": x.get("original_name", ""),
             "tipo": x.get("document_type", ""),
+            "azienda": x.get("company_name", ""),
             "nome_accettato": x.get("accepted_name", ""),
         }
         for x in examples
@@ -156,6 +158,79 @@ def _parse_json(text: str) -> dict:
     return value
 
 
+def _normalized(value: object) -> str:
+    text = str(value or "").casefold()
+    text = re.sub(r"[^a-z0-9à-ÿ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _field_value(result: dict, labels: set[str]) -> str:
+    wanted = {_normalized(x) for x in labels}
+    for field in result.get("key_fields", []) or []:
+        if not isinstance(field, dict):
+            continue
+        label = _normalized(field.get("label", ""))
+        value = str(field.get("value", "") or "").strip()
+        if not value:
+            continue
+        if label in wanted or any(token in label for token in wanted):
+            return value
+    return ""
+
+
+def _is_visura_camerale(result: dict) -> bool:
+    haystack = " ".join(
+        str(result.get(k, "") or "")
+        for k in ("document_type", "summary", "preview", "reason")
+    )
+    text = _normalized(haystack)
+    indicators = (
+        "visura camerale",
+        "visura ordinaria",
+        "visura storica",
+        "registro imprese",
+        "camera di commercio",
+        "archivio ufficiale della cciaa",
+    )
+    return any(x in text for x in indicators)
+
+
+def _company_name(result: dict) -> str:
+    direct = str(result.get("company_name", "") or "").strip()
+    if direct:
+        return direct
+    return _field_value(
+        result,
+        {
+            "denominazione impresa",
+            "denominazione",
+            "ragione sociale",
+            "nome azienda",
+            "società",
+            "societa",
+            "impresa",
+        },
+    )
+
+
+def _apply_priority_naming_rules(result: dict, original_name: str) -> dict:
+    if _is_visura_camerale(result):
+        company = _company_name(result)
+        result["document_type"] = "Visura Camerale"
+        if company:
+            result["company_name"] = company
+            result["suggested_filename"] = _safe_filename(
+                f"{company}_Visura Camerale",
+                original_name,
+            )
+            result["naming_rule"] = "NOME AZIENDA_Visura Camerale"
+            result["reason"] = (
+                "Regola FinancePlus prioritaria: documento riconosciuto come Visura Camerale; "
+                "usa la denominazione ufficiale dell'impresa presente nella visura."
+            )
+    return result
+
+
 def analyze_document(filename: str, data: bytes) -> dict:
     client = _client()
     ext = Path(filename).suffix.lower()
@@ -171,16 +246,27 @@ Devi:
 5. suggerire un nome file professionale;
 6. applicare, quando pertinenti, le convenzioni apprese dalle correzioni precedenti.
 
+REGOLA FINANCEPLUS PRIORITARIA — VISURA CAMERALE:
+- Se il documento è una Visura Camerale, Visura ordinaria, Visura storica o altro documento di visura del Registro Imprese/CCIAA, imposta document_type esattamente a "Visura Camerale".
+- Trova la DENOMINAZIONE UFFICIALE DELL'IMPRESA nel contenuto della visura, soprattutto nella prima pagina, nei campi "Denominazione", "Dati anagrafici" o intestazione dell'impresa.
+- Inserisci tale denominazione, senza abbreviazioni inventate, nel campo company_name.
+- Il nome suggerito DEVE essere esattamente: NOME AZIENDA_Visura Camerale + estensione originale.
+- Esempio di forma: FOOD E MEAT S.R.L._Visura Camerale.pdf
+- Per una Visura Camerale NON aggiungere data, codice fiscale, REA, città o altri dettagli al nome.
+- Questa regola ha priorità sulle convenzioni apprese e sulla convenzione generica di denominazione.
+
 Nome originale: {filename}
 Convenzioni già accettate dall'utente:
 {_learning_prompt()}
 
-Convenzione preferita per il nome: TIPO DOCUMENTO - SOGGETTO - DATA/PERIODO - DETTAGLIO.
+Per tutti gli altri documenti usa, quando possibile, una convenzione professionale basata su tipo documento, soggetto, data/periodo e dettaglio.
 Mantieni l'estensione originale e non inserire dati non presenti.
 
 Rispondi esattamente con questo schema:
 {{
   "document_type": "string",
+  "company_name": "string",
+  "document_date": "string",
   "confidence": 0.0,
   "summary": "string",
   "preview": "string",
@@ -214,13 +300,14 @@ Rispondi esattamente con questo schema:
             store=False,
         )
         result = _parse_json(response.output_text)
+        if not isinstance(result.get("key_fields"), list):
+            result["key_fields"] = []
+        result = _apply_priority_naming_rules(result, filename)
         result["suggested_filename"] = _safe_filename(result.get("suggested_filename", ""), filename)
         try:
             result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.0))))
         except Exception:
             result["confidence"] = 0.0
-        if not isinstance(result.get("key_fields"), list):
-            result["key_fields"] = []
         return result
     finally:
         if remote_file_id:
@@ -256,6 +343,10 @@ def render_document_ai() -> None:
     st.caption(
         "Seleziona i documenti: l'IA ne riconosce la tipologia, analizza il contenuto, mostra un'anteprima e propone un nome. "
         "Quando correggi e confermi il nome, la convenzione viene memorizzata e riutilizzata nelle analisi successive."
+    )
+    st.info(
+        "Regola automatica attiva: le Visure Camerali vengono denominate "
+        "NOME AZIENDA_Visura Camerale, usando la denominazione ufficiale trovata nel documento."
     )
 
     try:
@@ -345,6 +436,11 @@ def render_document_ai() -> None:
                 c1, c2 = st.columns(2)
                 c1.metric("Tipologia", result.get("document_type", "Non determinata"))
                 c2.metric("Affidabilità", f"{result.get('confidence', 0.0) * 100:.0f}%")
+
+                if result.get("company_name"):
+                    st.markdown(f"**Azienda riconosciuta:** {result.get('company_name')}")
+                if result.get("naming_rule"):
+                    st.success(f"Regola nome applicata: {result.get('naming_rule')}")
 
                 st.markdown("**Sintesi del contenuto**")
                 st.write(result.get("summary", ""))
