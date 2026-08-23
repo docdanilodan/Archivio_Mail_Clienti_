@@ -1,0 +1,25 @@
+name: Apply generic rules v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-generic-rules-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch
+        run: python mail_attachment_extractor/apply_generic_rules_patch.py
+      - name: Commit
+        run: |
+          git config user.name "FinancePlus Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add mail_attachment_extractor/document_ai.py
+          git commit -m "Add offer quote and bank statement naming rules"
+          git push
