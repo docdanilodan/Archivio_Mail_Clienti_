@@ -1,0 +1,83 @@
+name: Apply Ricevuta Bilancio naming rule
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-ricevuta-bilancio-naming-rule.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch Document AI receipt rule
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('mail_attachment_extractor/document_ai.py')
+          text = path.read_text(encoding='utf-8')
+
+          marker = '''def _is_visura_camerale(result: dict) -> bool:\n'''
+          helper = '''def _is_ricevuta_deposito_bilancio(result: dict) -> bool:\n    haystack = " ".join(\n        str(result.get(k, "") or "")\n        for k in ("document_type", "summary", "preview", "reason")\n    )\n    text = _normalized(haystack)\n    strong_indicators = (\n        "ricevuta dell avvenuta presentazione",\n        "ricevuta deposito bilancio",\n        "deposito bilancio",\n        "elenco degli atti presentati",\n        "presentazione via telematica",\n    )\n    has_receipt = any(x in text for x in strong_indicators)\n    has_balance = (\n        "bilancio" in text\n        and ("esercizio" in text or "deposito" in text or "atto" in text)\n    )\n    return has_receipt and has_balance\n\n\ndef _receipt_bilancio_year(result: dict) -> str:\n    direct = str(result.get("document_year", "") or "").strip()\n    if re.fullmatch(r"(?:19|20)\\d{2}", direct):\n        return direct\n\n    value = _field_value(\n        result,\n        {\n            "anno bilancio", "anno esercizio", "esercizio", "data atto",\n            "dt atto", "data chiusura esercizio", "bilancio esercizio"\n        },\n    )\n    match = re.search(r"\\b((?:19|20)\\d{2})\\b", value)\n    if match:\n        return match.group(1)\n\n    sources = [result.get("preview", ""), result.get("summary", ""), result.get("reason", "")]\n    patterns = (\n        r"bilancio(?:\\s+abbreviato)?\\s+(?:d[’']?esercizio|di esercizio).*?((?:19|20)\\d{2})",\n        r"(?:dt\\.?\\s*atto|data\\s*atto)\\s*[:=-]?\\s*\\d{1,2}[/-]\\d{1,2}[/-]((?:19|20)\\d{2})",\n        r"esercizio.*?((?:19|20)\\d{2})",\n    )\n    for source in sources:\n        normalized_source = _normalized(source)\n        for pattern in patterns:\n            match = re.search(pattern, normalized_source, flags=re.IGNORECASE)\n            if match:\n                return match.group(1)\n    return ""\n\n\n'''
+          if marker not in text:
+              raise SystemExit('Marker _is_visura_camerale non trovato')
+          if 'def _is_ricevuta_deposito_bilancio' not in text:
+              text = text.replace(marker, helper + marker, 1)
+
+          old = '''def _apply_priority_naming_rules(result: dict, original_name: str) -> dict:\n    if _is_visura_camerale(result):\n'''
+          new = '''def _apply_priority_naming_rules(result: dict, original_name: str) -> dict:\n    if _is_ricevuta_deposito_bilancio(result):\n        company = _company_name(result)\n        year = _receipt_bilancio_year(result)\n        result["document_type"] = "Ricevuta deposito Bilancio d’esercizio"\n        if company:\n            result["company_name"] = company\n        if year:\n            result["document_year"] = year\n        if company and year:\n            result["suggested_filename"] = _safe_filename(\n                f"{company}_Ricevuta deposito Bilancio d’esercizio {year}",\n                original_name,\n            )\n            result["naming_rule"] = "NOME AZIENDA_Ricevuta deposito Bilancio d’esercizio ANNO"\n            result["reason"] = (\n                "Regola FinancePlus prioritaria: documento riconosciuto come ricevuta di deposito del bilancio; "\n                "usa la denominazione dell’impresa e l’anno dell’esercizio depositato, non l’anno del protocollo."\n            )\n    elif _is_visura_camerale(result):\n'''
+          if old not in text:
+              raise SystemExit('Marker priority rules non trovato')
+          text = text.replace(old, new, 1)
+
+          marker = '''REGOLA FINANCEPLUS PRIORITARIA — VISURA CAMERALE:\n'''
+          prompt_rule = '''REGOLA FINANCEPLUS PRIORITARIA — RICEVUTA DEPOSITO BILANCIO:\n- Questa regola deve essere verificata PRIMA della Visura Camerale e del Bilancio d’esercizio.\n- Se il documento è una ricevuta/ricevuta telematica della Camera di Commercio o Registro Imprese relativa alla presentazione/deposito di un bilancio, imposta document_type esattamente a "Ricevuta deposito Bilancio d’esercizio".\n- Elementi tipici: "Ricevuta dell’avvenuta presentazione", "presentazione via telematica", "Elenco degli atti presentati", "Deposito bilancio", protocollo, diritti di segreteria o bollo.\n- Trova la DENOMINAZIONE UFFICIALE DELL’IMPRESA indicata nella ricevuta e inseriscila in company_name.\n- Ricava document_year dall’ANNO DEL BILANCIO/ESERCIZIO DEPOSITATO, non dalla data della domanda, protocollo, ricevuta o firma.\n- Esempio: ricevuta datata 22/02/2025 con atto "Bilancio abbreviato d’esercizio" e DT.ATTO 31/12/2023 => document_year = "2023".\n- Il nome suggerito DEVE essere esattamente: NOME AZIENDA_Ricevuta deposito Bilancio d’esercizio ANNO + estensione originale.\n- Esempio: SCHIANO S.R.L._Ricevuta deposito Bilancio d’esercizio 2023.pdf\n- NON aggiungere data protocollo, numero protocollo, REA, codice fiscale, importi di bollo/diritti o altri dettagli.\n\n'''
+          if marker not in text:
+              raise SystemExit('Marker prompt Visura non trovato')
+          if 'REGOLA FINANCEPLUS PRIORITARIA — RICEVUTA DEPOSITO BILANCIO:' not in text:
+              text = text.replace(marker, prompt_rule + marker, 1)
+
+          old = '''    st.info(\n        "Regole automatiche attive: Visure Camerali → NOME AZIENDA_Visura Camerale; "\n        "Bilanci d’esercizio → NOME AZIENDA_Bilancio d’esercizio ANNO."\n    )\n'''
+          new = '''    st.info(\n        "Regole automatiche attive: Ricevute deposito bilancio → NOME AZIENDA_Ricevuta deposito Bilancio d’esercizio ANNO; "\n        "Visure Camerali → NOME AZIENDA_Visura Camerale; "\n        "Bilanci d’esercizio → NOME AZIENDA_Bilancio d’esercizio ANNO."\n    )\n'''
+          if old not in text:
+              raise SystemExit('Marker UI regole non trovato')
+          text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Add receipt seed to adaptive learning engine
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('mail_attachment_extractor/document_learning.py')
+          if not path.exists():
+              raise SystemExit(0)
+          text = path.read_text(encoding='utf-8')
+          if 'Ricevuta deposito Bilancio d’esercizio' in text:
+              raise SystemExit(0)
+
+          marker = '''    {\n        "source": "FinancePlus seed",\n        "timestamp": "2026-08-23T00:00:00+00:00",\n        "original_name": "BILANCIO 2023_SCHIANO SRL.pdf",\n'''
+          seed = '''    {\n        "source": "FinancePlus seed",\n        "timestamp": "2026-08-23T00:00:00+00:00",\n        "original_name": "RICEVUTA BILANCIO 2023_SCHIANO SRL.pdf",\n        "document_type": "Ricevuta deposito Bilancio d’esercizio",\n        "company_name": "SCHIANO S.R.L.",\n        "document_year": "2023",\n        "document_date": "22/02/2025",\n        "accepted_name": "SCHIANO S.R.L._Ricevuta deposito Bilancio d’esercizio 2023.pdf",\n        "naming_template": "{company_name}_Ricevuta deposito Bilancio d’esercizio {document_year}{extension}",\n        "signature_terms": [\n            "ricevuta", "presentazione", "telematica", "registro", "imprese", "deposito",\n            "bilancio", "atti", "presentati", "protocollo", "diritti", "bollo"\n        ],\n        "field_labels": [\n            "denominazione", "data atto", "anno esercizio", "data domanda",\n            "data protocollo", "numero rea", "codice fiscale"\n        ],\n    },\n'''
+          if marker not in text:
+              raise SystemExit('Marker seed bilancio non trovato')
+          text = text.replace(marker, seed + marker, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit applied rule
+        shell: bash
+        run: |
+          git config user.name "FinancePlus Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add mail_attachment_extractor/document_ai.py mail_attachment_extractor/document_learning.py
+          git commit -m "Add receipt of balance deposit naming rule"
+          git push
