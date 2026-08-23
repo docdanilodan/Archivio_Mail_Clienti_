@@ -235,7 +235,7 @@ def local_splitter_component():
       button{background:#12304A;color:white;border:0;border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer}
       button.folder{background:#B88952}
       button.secondary{background:white;color:#12304A;border:1px solid #b88952;padding:7px 10px;font-size:12px}
-      button:disabled{opacity:.55;cursor:not-allowed}
+      button:disabled{opacity:.65;cursor:not-allowed}
       #parts{margin-top:12px;border:1px solid #e0e5ea;border-radius:10px;overflow:hidden;display:none;max-height:420px;overflow-y:auto}
       .ph{position:sticky;top:0;display:grid;grid-template-columns:48px 1fr 85px 120px;background:#12304A;color:white;font-weight:700;padding:8px 9px;font-size:12px;z-index:2}
       .pr{display:grid;grid-template-columns:48px 1fr 85px 120px;align-items:center;padding:7px 9px;border-top:1px solid #e8edf1;font-size:12px;gap:5px}
@@ -256,11 +256,11 @@ def local_splitter_component():
 
     <div class="box">
       <h3 style="margin-top:0;color:#12304A">1. Dividi e salva il file grande</h3>
-      <p style="color:#465866">Il file viene diviso <b>localmente sul dispositivo</b>. Nessun file da 20–25 GB viene prima inviato a Streamlit.</p>
+      <p style="color:#465866">Il file viene diviso <b>localmente sul dispositivo</b>. Il file originale non viene caricato su Streamlit.</p>
 
-      <div class="note">
-        <b>Flusso consigliato:</b><br>
-        1) scegli il file originale; 2) scegli la cartella di destinazione; 3) premi <b>Dividi e salva tutto</b>. Le parti vengono create automaticamente una dopo l'altra.
+      <div id="mainnote" class="note">
+        <b>Flusso:</b><br>
+        scegli il file originale, imposta la dimensione delle parti e premi <b>Dividi e salva tutto</b>.
       </div>
 
       <input id="bigfile" type="file" style="margin:8px 0 10px;width:100%" />
@@ -291,10 +291,14 @@ def local_splitter_component():
       let chunk = 100 * 1024 * 1024;
       let total = 0;
 
-      const supportsFolderPicker = ('showDirectoryPicker' in window);
+      const ua = navigator.userAgent || '';
+      const isiOS = /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      const supportsFolderPicker = !isiOS && ('showDirectoryPicker' in window);
+
       const folderBtn = document.getElementById('folderbtn');
       const folderState = document.getElementById('folderstate');
       const fallbackNote = document.getElementById('fallbacknote');
+      const mainNote = document.getElementById('mainnote');
       const status = document.getElementById('status');
       const prog = document.getElementById('prog');
 
@@ -340,7 +344,7 @@ def local_splitter_component():
         document.body.appendChild(a);
         a.click();
         a.remove();
-        await sleep(450);
+        await sleep(550);
         URL.revokeObjectURL(url);
       }
 
@@ -357,7 +361,7 @@ def local_splitter_component():
           return '✅ Salvata nella cartella';
         }
         await browserDownload(blob, filename);
-        return '✅ Download avviato';
+        return isiOS ? '✅ Inviata a Download' : '✅ Download avviato';
       }
 
       async function saveOne(i){
@@ -370,16 +374,23 @@ def local_splitter_component():
           st.textContent = await saveBlob(blob, partName(i));
           st.className = 'status ok';
         }catch(err){
-          st.textContent = '❌ ' + (err && err.message ? err.message : 'Errore');
+          st.textContent = '❌ Errore';
           st.className = 'status';
         }
       }
 
-      if(!supportsFolderPicker){
+      if(isiOS){
         folderBtn.disabled = true;
-        folderState.textContent = 'Selezione cartella non disponibile in questo browser.';
+        folderBtn.textContent = '📁 Download di Safari';
+        folderState.textContent = 'iPhone/iPad: Safari non permette a questa app di selezionare una cartella di scrittura.';
+        mainNote.innerHTML = '<b>Su iPhone:</b><br>la destinazione viene stabilita da Safari. Impostala prima in <b>Impostazioni → App → Safari → Download</b>, scegliendo iCloud Drive oppure “Su iPhone”. Poi torna qui e premi <b>Dividi e salva tutto</b>.';
         fallbackNote.style.display = 'block';
-        fallbackNote.innerHTML = '<b>Fallback automatico:</b> “Dividi e salva tutto” avvierà i download sequenziali nella cartella Download configurata dal browser. Su iPhone la posizione si imposta nelle impostazioni di Safari.';
+        fallbackNote.innerHTML = '<b>Importante:</b> i download verranno richiesti automaticamente uno dopo l’altro. Se Safari chiede il permesso per download multipli, consenti.';
+      }else if(!supportsFolderPicker){
+        folderBtn.disabled = true;
+        folderState.textContent = 'Questo browser non supporta la selezione di una cartella di scrittura.';
+        fallbackNote.style.display = 'block';
+        fallbackNote.textContent = 'Verrà usata la cartella Download configurata nel browser.';
       }else{
         folderState.textContent = 'Nessuna cartella selezionata.';
       }
@@ -397,7 +408,7 @@ def local_splitter_component():
             dirHandle = null;
             folderState.textContent = 'Impossibile usare la cartella scelta. Verrà usato Download.';
             fallbackNote.style.display = 'block';
-            fallbackNote.textContent = 'Il browser non ha concesso la scrittura diretta. Verranno avviati download sequenziali.';
+            fallbackNote.textContent = 'Il browser non ha concesso la scrittura diretta. Verranno usati i download.';
           }
         }
       };
@@ -420,7 +431,7 @@ def local_splitter_component():
         prog.value = 0;
 
         if(!dirHandle && supportsFolderPicker){
-          const proceed = confirm('Non hai selezionato una cartella. Vuoi continuare usando la cartella Download del browser?');
+          const proceed = confirm('Non hai selezionato una cartella. Vuoi usare la cartella Download del browser?');
           if(!proceed) return;
         }
 
@@ -438,12 +449,12 @@ def local_splitter_component():
           }catch(err){
             st.textContent = '❌ Errore';
             st.className = 'status';
-            status.textContent = 'Errore su ' + filename + '. Puoi usare “Salva singola” per riprovare.';
+            status.textContent = 'Errore su ' + filename + '. Usa “Salva singola” per riprovare.';
             return;
           }
 
           prog.value = ((i + 1) / total) * 100;
-          await sleep(dirHandle ? 20 : 250);
+          await sleep(dirHandle ? 20 : (isiOS ? 700 : 300));
         }
 
         const manifest = {
@@ -457,12 +468,12 @@ def local_splitter_component():
         await saveBlob(manifestBlob, selectedFile.name + '.manifest.json');
 
         status.textContent = dirHandle
-          ? '✅ Completato: tutte le ' + total + ' parti sono state salvate nella cartella selezionata.'
-          : '✅ Completato: avviato il download di tutte le ' + total + ' parti nella cartella Download del browser.';
+          ? '✅ Completato: tutte le parti sono state salvate nella cartella selezionata.'
+          : '✅ Completato: tutti i download sono stati richiesti alla cartella Download del browser.';
       };
     </script>
     '''
-    components.html(html, height=760, scrolling=True)
+    components.html(html, height=780, scrolling=True)
 
 
 def render_results(ms, ws):
@@ -510,7 +521,7 @@ def main():
     core.css()
     st.markdown(
         '<div class="fp-head"><h1>📬 FinancePlus | Archivio Mail</h1>'
-        '<p>Divisione locale • scelta cartella quando supportata • salvataggio automatico • caricamento progressivo</p></div>',
+        '<p>Divisione locale • Download automatici su iPhone • scelta cartella sui browser compatibili</p></div>',
         unsafe_allow_html=True,
     )
 
@@ -555,11 +566,7 @@ def main():
             )
 
             key = f"single_part_{st.session_state.get('part_uploader_key', 0)}"
-            one = st.file_uploader(
-                "Carica una parte",
-                accept_multiple_files=False,
-                key=key,
-            )
+            one = st.file_uploader("Carica una parte", accept_multiple_files=False, key=key)
 
             if one is not None:
                 try:
@@ -568,8 +575,7 @@ def main():
                         raise ValueError("Il file scelto non è una parte .partXXXX")
                     if info[1] != nxt and info[1] not in staged:
                         st.warning(
-                            f"Attesa part{nxt:04d}; hai scelto part{info[1]:04d}. "
-                            "Verrà comunque salvata."
+                            f"Attesa part{nxt:04d}; hai scelto part{info[1]:04d}. Verrà comunque salvata."
                         )
                     num, size = save_one_part(one)
                     st.toast(f"part{num:04d} caricata: {size/1024**2:.1f} MB", icon="✅")
@@ -591,8 +597,7 @@ def main():
                 st.dataframe(rows, use_container_width=True, hide_index=True)
                 total = sum(v["size"] for v in staged.values())
                 st.success(
-                    f"{len(staged)} parti salvate • {total/1024**3:.2f} GB • "
-                    f"Prossima: part{next_expected_part():04d}"
+                    f"{len(staged)} parti salvate • {total/1024**3:.2f} GB • Prossima: part{next_expected_part():04d}"
                 )
 
                 c1, c2 = st.columns([2, 1])
@@ -618,11 +623,7 @@ def main():
                 "Su dispositivi mobili questa modalità può essere più pesante. "
                 "Per archivi grandi è preferibile caricare le parti una alla volta."
             )
-            parts = st.file_uploader(
-                "Seleziona tutte le parti",
-                accept_multiple_files=True,
-                key="all_parts",
-            )
+            parts = st.file_uploader("Seleziona tutte le parti", accept_multiple_files=True, key="all_parts")
             if parts:
                 total = sum(getattr(f, "size", 0) or 0 for f in parts)
                 st.caption(f"Selezionate {len(parts)} parti • {total/1024**3:.2f} GB")
@@ -639,10 +640,7 @@ def main():
                     finally:
                         bar.empty()
 
-    render_results(
-        st.session_state.get("mails", []),
-        st.session_state.get("warns", []),
-    )
+    render_results(st.session_state.get("mails", []), st.session_state.get("warns", []))
 
 
 if __name__ == "__main__":
