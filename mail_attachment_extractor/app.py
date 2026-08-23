@@ -209,62 +209,94 @@ def parse_reconstructed_path(path: Path):
 
 def local_splitter_component():
     html = r'''
-    <div style="font-family:Arial,sans-serif;border:1px solid #d8dee5;border-top:4px solid #b88952;border-radius:12px;padding:18px;background:white">
+    <style>
+      *{box-sizing:border-box}
+      body{margin:0;font-family:Arial,sans-serif;color:#17324a}
+      .box{border:1px solid #d8dee5;border-top:4px solid #b88952;border-radius:12px;padding:18px;background:white}
+      .note{background:#f2f6fa;border-left:4px solid #b88952;border-radius:8px;padding:11px 13px;margin:12px 0;color:#344b5f;font-size:14px;line-height:1.4}
+      .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0}
+      button{background:#12304A;color:white;border:0;border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer}
+      button.secondary{background:white;color:#12304A;border:1px solid #b88952;padding:7px 10px;font-size:12px}
+      #parts{margin-top:14px;border:1px solid #e0e5ea;border-radius:10px;overflow:hidden;display:none}
+      .ph{display:grid;grid-template-columns:55px 1fr 95px 105px;background:#12304A;color:white;font-weight:700;padding:9px 10px;font-size:12px}
+      .pr{display:grid;grid-template-columns:55px 1fr 95px 105px;align-items:center;padding:8px 10px;border-top:1px solid #e8edf1;font-size:12px;gap:6px}
+      .pr:nth-child(odd){background:#f8fafb}
+      .filename{word-break:break-all}
+      .status{font-weight:700;color:#6b7780}
+      .status.ok{color:#1c7c54}
+      progress{width:100%;margin-top:8px;display:none}
+      @media(max-width:600px){.ph,.pr{grid-template-columns:42px 1fr 78px}.ph div:nth-child(4),.pr div:nth-child(4){grid-column:1/-1}.pr button{width:100%}}
+    </style>
+    <div class="box">
       <h3 style="margin-top:0;color:#12304A">1. Seleziona il file grande e dividilo localmente</h3>
-      <p style="color:#465866">Il file non viene caricato sul server in questa fase. Il browser lo divide sul tuo computer in parti da circa 500 MB.</p>
-      <input id="bigfile" type="file" style="margin:8px 0 14px 0;width:100%" />
-      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-        <label>Dimensione parte (MB): <input id="chunkmb" type="number" value="500" min="100" max="900" step="50" style="width:90px;padding:5px"></label>
-        <button id="splitbtn" style="background:#12304A;color:white;border:0;border-radius:8px;padding:10px 16px;font-weight:700;cursor:pointer">Dividi e salva le parti</button>
+      <p style="color:#465866;margin-bottom:6px">Il file originale non viene caricato su Streamlit. Il browser legge il file sul dispositivo e crea parti da circa 500 MB.</p>
+      <div class="note"><b>Dove vengono salvate?</b><br>Su iPhone/Safari: nell'app <b>File → Download</b> (iCloud Drive oppure “Su iPhone”, secondo le impostazioni Safari). Su computer, se il browser consente la scelta cartella, potrai scegliere dove salvarle; altrimenti finiscono nella cartella Download.</div>
+      <input id="bigfile" type="file" style="margin:8px 0 10px;width:100%" />
+      <div class="controls">
+        <label>Dimensione parte (MB): <input id="chunkmb" type="number" value="500" min="100" max="900" step="50" style="width:90px;padding:6px"></label>
+        <button id="splitbtn">Dividi e salva tutte le parti</button>
       </div>
-      <div id="status" style="margin-top:14px;color:#12304A;font-weight:600"></div>
-      <progress id="prog" value="0" max="100" style="width:100%;margin-top:8px;display:none"></progress>
+      <div id="status" style="margin-top:10px;color:#12304A;font-weight:700"></div>
+      <progress id="prog" value="0" max="100"></progress>
+      <div id="parts">
+        <div class="ph"><div>#</div><div>Nome parte</div><div>Dimensione</div><div>Stato / Azione</div></div>
+        <div id="partrows"></div>
+      </div>
     </div>
     <script>
     const sleep = ms => new Promise(r => setTimeout(r, ms));
+    let selectedFile=null, currentChunk=500*1024*1024, totalParts=0;
     function fmtBytes(n){ const u=['B','KB','MB','GB','TB']; let i=0,v=n; while(v>=1024&&i<u.length-1){v/=1024;i++;} return v.toFixed(i>1?2:1)+' '+u[i]; }
-    async function downloadBlob(blob, name){
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
-      await sleep(450); URL.revokeObjectURL(url);
+    function partName(i){ return selectedFile.name+'.part'+String(i+1).padStart(4,'0'); }
+    function renderParts(){
+      const rows=document.getElementById('partrows'); rows.innerHTML='';
+      if(!selectedFile){document.getElementById('parts').style.display='none';return;}
+      const mb=parseInt(document.getElementById('chunkmb').value||'500',10); currentChunk=mb*1024*1024; totalParts=Math.ceil(selectedFile.size/currentChunk);
+      document.getElementById('parts').style.display='block';
+      for(let i=0;i<totalParts;i++){
+        const start=i*currentChunk,end=Math.min(start+currentChunk,selectedFile.size),size=end-start;
+        const row=document.createElement('div'); row.className='pr'; row.id='row-'+i;
+        row.innerHTML='<div>'+(i+1)+'</div><div class="filename">'+partName(i)+'</div><div>'+fmtBytes(size)+'</div><div><span class="status" id="st-'+i+'">Da creare</span><br><button class="secondary" id="btn-'+i+'" type="button">Scarica</button></div>';
+        rows.appendChild(row);
+        document.getElementById('btn-'+i).addEventListener('click',()=>downloadOne(i));
+      }
     }
-    document.getElementById('bigfile').addEventListener('change', e => {
-      const f=e.target.files[0]; if(f) document.getElementById('status').textContent='File selezionato: '+f.name+' • '+fmtBytes(f.size);
+    async function downloadBlob(blob,name){
+      const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove(); await sleep(500); URL.revokeObjectURL(url);
+    }
+    async function downloadOne(i){
+      if(!selectedFile)return;
+      const start=i*currentChunk,end=Math.min(start+currentChunk,selectedFile.size),blob=selectedFile.slice(start,end),name=partName(i),st=document.getElementById('st-'+i);
+      st.textContent='Preparazione…'; await downloadBlob(blob,name); st.textContent='✅ Scaricata'; st.className='status ok';
+    }
+    document.getElementById('bigfile').addEventListener('change',e=>{
+      selectedFile=e.target.files[0]||null;
+      const status=document.getElementById('status');
+      if(selectedFile){status.textContent='File selezionato: '+selectedFile.name+' • '+fmtBytes(selectedFile.size);renderParts();}
+      else{status.textContent='';renderParts();}
     });
-    document.getElementById('splitbtn').addEventListener('click', async () => {
-      const f=document.getElementById('bigfile').files[0];
-      if(!f){alert('Seleziona prima il file grande.');return;}
-      const mb=parseInt(document.getElementById('chunkmb').value||'500',10);
-      const chunk=mb*1024*1024;
-      const total=Math.ceil(f.size/chunk);
-      const status=document.getElementById('status'), prog=document.getElementById('prog'); prog.style.display='block';
-      const useDir = ('showDirectoryPicker' in window);
+    document.getElementById('chunkmb').addEventListener('change',renderParts);
+    document.getElementById('splitbtn').addEventListener('click',async()=>{
+      if(!selectedFile){alert('Seleziona prima il file grande.');return;}
+      renderParts();
+      const status=document.getElementById('status'),prog=document.getElementById('prog');prog.style.display='block';prog.value=0;
       let dir=null;
-      if(useDir){
-        try{dir=await window.showDirectoryPicker({mode:'readwrite'});}catch(e){dir=null;}
+      if('showDirectoryPicker' in window){try{dir=await window.showDirectoryPicker({mode:'readwrite'});}catch(e){dir=null;}}
+      for(let i=0;i<totalParts;i++){
+        const start=i*currentChunk,end=Math.min(start+currentChunk,selectedFile.size),blob=selectedFile.slice(start,end),name=partName(i),st=document.getElementById('st-'+i);
+        status.textContent='Creazione '+name+' • '+(i+1)+'/'+totalParts; st.textContent='Creazione…';
+        if(dir){const h=await dir.getFileHandle(name,{create:true});const w=await h.createWritable();await w.write(blob);await w.close();st.textContent='✅ Salvata';}
+        else{await downloadBlob(blob,name);st.textContent='✅ Scaricata';}
+        st.className='status ok';prog.value=((i+1)/totalParts)*100;await sleep(80);
       }
-      for(let i=0;i<total;i++){
-        const start=i*chunk, end=Math.min(start+chunk,f.size), blob=f.slice(start,end);
-        const name=f.name+'.part'+String(i+1).padStart(4,'0');
-        status.textContent='Creazione '+name+' ('+(i+1)+'/'+total+')';
-        if(dir){
-          const handle=await dir.getFileHandle(name,{create:true}); const w=await handle.createWritable(); await w.write(blob); await w.close();
-        }else{
-          await downloadBlob(blob,name);
-        }
-        prog.value=((i+1)/total)*100;
-        await sleep(50);
-      }
-      const manifest={original_name:f.name,original_size:f.size,chunk_size:chunk,total_parts:total,created_at:new Date().toISOString()};
-      const mblob=new Blob([JSON.stringify(manifest,null,2)],{type:'application/json'});
-      const mname=f.name+'.manifest.json';
-      if(dir){const h=await dir.getFileHandle(mname,{create:true});const w=await h.createWritable();await w.write(mblob);await w.close();}
-      else{await downloadBlob(mblob,mname);}
-      status.textContent='Completato: '+total+' parti create da circa '+mb+' MB ciascuna.';
+      const manifest={original_name:selectedFile.name,original_size:selectedFile.size,chunk_size:currentChunk,total_parts:totalParts,created_at:new Date().toISOString()};
+      const mblob=new Blob([JSON.stringify(manifest,null,2)],{type:'application/json'}),mname=selectedFile.name+'.manifest.json';
+      if(dir){const h=await dir.getFileHandle(mname,{create:true});const w=await h.createWritable();await w.write(mblob);await w.close();}else{await downloadBlob(mblob,mname);}
+      status.textContent='Completato: '+totalParts+' parti create. Ora le trovi in Download e puoi caricarle nell’app qui sotto.';
     });
     </script>
     '''
-    components.html(html, height=290, scrolling=False)
+    components.html(html, height=720, scrolling=True)
 
 
 def render_results(ms, ws):
