@@ -1,0 +1,65 @@
+name: Apply Bilancio naming rule
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-bilancio-naming-rule.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch FinancePlus Document AI rules
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('mail_attachment_extractor/document_ai.py')
+          text = path.read_text(encoding='utf-8')
+
+          old = '''    return any(x in text for x in indicators)\n\n\ndef _company_name(result: dict) -> str:\n'''
+          new = '''    return any(x in text for x in indicators)\n\n\ndef _is_bilancio_esercizio(result: dict) -> bool:\n    haystack = " ".join(\n        str(result.get(k, "") or "")\n        for k in ("document_type", "summary", "preview", "reason")\n    )\n    text = _normalized(haystack)\n    return (\n        "bilancio di esercizio" in text\n        or "bilancio d esercizio" in text\n        or ("stato patrimoniale" in text and "conto economico" in text)\n    )\n\n\ndef _document_year(result: dict) -> str:\n    sources = [\n        result.get("document_year", ""),\n        result.get("document_date", ""),\n        result.get("summary", ""),\n        result.get("preview", ""),\n    ]\n    for source in sources:\n        match = re.search(r"\\b((?:19|20)\\d{2})\\b", str(source or ""))\n        if match:\n            return match.group(1)\n    return _field_value(\n        result,\n        {"anno", "anno esercizio", "esercizio", "data bilancio", "data chiusura esercizio"},\n    )\n\n\ndef _company_name(result: dict) -> str:\n'''
+          if old not in text:
+              raise SystemExit('Pattern helper non trovato')
+          text = text.replace(old, new, 1)
+
+          old = '''            result["reason"] = (\n                "Regola FinancePlus prioritaria: documento riconosciuto come Visura Camerale; "\n                "usa la denominazione ufficiale dell'impresa presente nella visura."\n            )\n    return result\n'''
+          new = '''            result["reason"] = (\n                "Regola FinancePlus prioritaria: documento riconosciuto come Visura Camerale; "\n                "usa la denominazione ufficiale dell'impresa presente nella visura."\n            )\n    elif _is_bilancio_esercizio(result):\n        company = _company_name(result)\n        year = _document_year(result)\n        result["document_type"] = "Bilancio d’esercizio"\n        if company:\n            result["company_name"] = company\n        if year:\n            result["document_year"] = year\n        if company and year:\n            result["suggested_filename"] = _safe_filename(\n                f"{company}_Bilancio d’esercizio {year}",\n                original_name,\n            )\n            result["naming_rule"] = "NOME AZIENDA_Bilancio d’esercizio ANNO"\n            result["reason"] = (\n                "Regola FinancePlus prioritaria: documento riconosciuto come Bilancio d’esercizio; "\n                "usa la denominazione ufficiale dell’azienda e l’anno di esercizio presenti nel documento."\n            )\n    return result\n'''
+          if old not in text:
+              raise SystemExit('Pattern apply rules non trovato')
+          text = text.replace(old, new, 1)
+
+          old = '''- Questa regola ha priorità sulle convenzioni apprese e sulla convenzione generica di denominazione.\n\nNome originale: {filename}\n'''
+          new = '''- Questa regola ha priorità sulle convenzioni apprese e sulla convenzione generica di denominazione.\n\nREGOLA FINANCEPLUS PRIORITARIA — BILANCIO D’ESERCIZIO:\n- Se il documento è un Bilancio di esercizio, un fascicolo di bilancio con Stato patrimoniale/Conto economico/Nota integrativa o documento equivalente, imposta document_type esattamente a "Bilancio d’esercizio".\n- Trova la DENOMINAZIONE UFFICIALE DELL’AZIENDA nella prima pagina o nell’intestazione del bilancio e inseriscila in company_name senza abbreviazioni inventate.\n- Ricava l’ANNO DI ESERCIZIO dalla dicitura del documento, ad esempio "Bilancio di esercizio al 31-12-2023" deve produrre document_year = "2023".\n- Il nome suggerito DEVE essere esattamente: NOME AZIENDA_Bilancio d’esercizio ANNO + estensione originale.\n- Esempio di forma: SCHIANO S.R.L._Bilancio d’esercizio 2023.pdf\n- NON aggiungere al nome data completa, codice fiscale, REA, città, utile/perdita o altri dettagli.\n- Questa regola ha priorità sulle convenzioni apprese e sulla convenzione generica di denominazione, ma viene dopo la regola specifica Visura Camerale.\n\nNome originale: {filename}\n'''
+          if old not in text:
+              raise SystemExit('Pattern prompt non trovato')
+          text = text.replace(old, new, 1)
+
+          old = '''  "company_name": "string",\n  "document_date": "string",\n  "confidence": 0.0,\n'''
+          new = '''  "company_name": "string",\n  "document_date": "string",\n  "document_year": "string",\n  "confidence": 0.0,\n'''
+          if old not in text:
+              raise SystemExit('Pattern schema non trovato')
+          text = text.replace(old, new, 1)
+
+          old = '''    st.info(\n        "Regola automatica attiva: le Visure Camerali vengono denominate "\n        "NOME AZIENDA_Visura Camerale, usando la denominazione ufficiale trovata nel documento."\n    )\n'''
+          new = '''    st.info(\n        "Regole automatiche attive: Visure Camerali → NOME AZIENDA_Visura Camerale; "\n        "Bilanci d’esercizio → NOME AZIENDA_Bilancio d’esercizio ANNO."\n    )\n'''
+          if old not in text:
+              raise SystemExit('Pattern UI non trovato')
+          text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+      - name: Commit applied rule
+        shell: bash
+        run: |
+          git config user.name "FinancePlus Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add mail_attachment_extractor/document_ai.py
+          git commit -m "Enforce Bilancio esercizio company-year naming rule"
+          git push
