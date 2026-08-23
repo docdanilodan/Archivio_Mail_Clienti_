@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import mailbox
-import os
 import re
 import shutil
 import tempfile
@@ -27,30 +26,19 @@ def parse_part_name(name: str):
 
 def validate_part_records(records):
     if not records:
-        raise ValueError("Nessuna parte selezionata.")
+        raise ValueError("Nessuna parte caricata.")
     bases = {r[0] for r in records}
     if len(bases) != 1:
         raise ValueError("Le parti appartengono a file originali diversi.")
     records = sorted(records, key=lambda x: x[1])
     nums = [r[1] for r in records]
     if nums[0] != 1:
-        raise ValueError("La prima parte deve essere .part0001")
-    expected = list(range(1, len(nums) + 1))
-    if nums != expected:
-        missing = sorted(set(expected) - set(nums))
-        raise ValueError(f"Sequenza parti non continua. Parti mancanti: {missing or 'verificare numerazione'}")
+        raise ValueError("Manca part0001.")
+    expected = list(range(1, max(nums) + 1))
+    missing = sorted(set(expected) - set(nums))
+    if missing:
+        raise ValueError("Parti mancanti: " + ", ".join(f"part{x:04d}" for x in missing))
     return records
-
-
-def validate_uploaded_parts(uploaded_parts):
-    records = []
-    for f in uploaded_parts:
-        info = parse_part_name(f.name)
-        if not info:
-            raise ValueError(f"Nome parte non valido: {f.name}. Atteso: nomefile.ext.part0001")
-        base, num = info
-        records.append((base, num, f))
-    return validate_part_records(records)
 
 
 def ensure_stage_dir():
@@ -73,51 +61,49 @@ def clear_staged_parts():
 def save_one_part(uploaded):
     info = parse_part_name(uploaded.name)
     if not info:
-        raise ValueError("Nome parte non valido. Esempio: archivio.mbox.part0001")
+        raise ValueError("Nome non valido. Deve terminare con .part0001, .part0002, ecc.")
     base, num = info
     stage = ensure_stage_dir()
     current = st.session_state.get("staged_parts", {})
     existing_bases = {v["base"] for v in current.values()}
     if existing_bases and base not in existing_bases:
-        raise ValueError("Questa parte appartiene a un altro file. Svuota le parti già caricate oppure scegli il file corretto.")
+        raise ValueError("La parte appartiene a un altro archivio. Svuota le parti prima di cambiare file.")
+
     dest = stage / Path(uploaded.name).name
     uploaded.seek(0)
     with dest.open("wb") as fout:
         while True:
-            block = uploaded.read(8 * 1024 * 1024)
+            block = uploaded.read(4 * 1024 * 1024)
             if not block:
                 break
             fout.write(block)
-    current[num] = {"base": base, "path": str(dest), "name": uploaded.name, "size": dest.stat().st_size}
+
+    current[num] = {
+        "base": base,
+        "path": str(dest),
+        "name": uploaded.name,
+        "size": dest.stat().st_size,
+    }
     st.session_state.staged_parts = current
+    return num, dest.stat().st_size
 
 
 def staged_records():
-    recs = []
-    for num, meta in st.session_state.get("staged_parts", {}).items():
-        recs.append((meta["base"], int(num), Path(meta["path"])))
-    return recs
+    return [
+        (meta["base"], int(num), Path(meta["path"]))
+        for num, meta in st.session_state.get("staged_parts", {}).items()
+    ]
 
 
-def reconstruct_uploaded_parts_to_disk(uploaded_parts, progress=None):
-    records = validate_uploaded_parts(uploaded_parts)
-    original_name = records[0][0]
-    suffix = Path(original_name).suffix.lower()
-    if suffix not in SUPPORTED:
-        raise ValueError(f"Formato originale non supportato: {suffix}")
-    workdir = tempfile.mkdtemp(prefix="financeplus_rebuilt_")
-    out_path = Path(workdir) / Path(original_name).name
-    with out_path.open("wb") as fout:
-        for i, (_, _, uploaded) in enumerate(records, start=1):
-            uploaded.seek(0)
-            while True:
-                block = uploaded.read(8 * 1024 * 1024)
-                if not block:
-                    break
-                fout.write(block)
-            if progress:
-                progress.progress(i / len(records), text=f"Ricostruzione parte {i}/{len(records)}")
-    return out_path
+def next_expected_part():
+    nums = sorted(int(x) for x in st.session_state.get("staged_parts", {}).keys())
+    expected = 1
+    for num in nums:
+        if num == expected:
+            expected += 1
+        elif num > expected:
+            break
+    return expected
 
 
 def reconstruct_staged_parts_to_disk(progress=None):
@@ -126,6 +112,7 @@ def reconstruct_staged_parts_to_disk(progress=None):
     suffix = Path(original_name).suffix.lower()
     if suffix not in SUPPORTED:
         raise ValueError(f"Formato originale non supportato: {suffix}")
+
     workdir = tempfile.mkdtemp(prefix="financeplus_rebuilt_")
     out_path = Path(workdir) / Path(original_name).name
     with out_path.open("wb") as fout:
@@ -137,7 +124,35 @@ def reconstruct_staged_parts_to_disk(progress=None):
                         break
                     fout.write(block)
             if progress:
-                progress.progress(i / len(records), text=f"Ricostruzione parte {i}/{len(records)}")
+                progress.progress(i / len(records), text=f"Ricostruzione {i}/{len(records)}")
+    return out_path
+
+
+def reconstruct_uploaded_parts_to_disk(uploaded_parts, progress=None):
+    records = []
+    for f in uploaded_parts:
+        info = parse_part_name(f.name)
+        if not info:
+            raise ValueError(f"Nome parte non valido: {f.name}")
+        records.append((info[0], info[1], f))
+    records = validate_part_records(records)
+    original_name = records[0][0]
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in SUPPORTED:
+        raise ValueError(f"Formato originale non supportato: {suffix}")
+
+    workdir = tempfile.mkdtemp(prefix="financeplus_rebuilt_")
+    out_path = Path(workdir) / Path(original_name).name
+    with out_path.open("wb") as fout:
+        for i, (_, _, uploaded) in enumerate(records, start=1):
+            uploaded.seek(0)
+            while True:
+                block = uploaded.read(4 * 1024 * 1024)
+                if not block:
+                    break
+                fout.write(block)
+            if progress:
+                progress.progress(i / len(records), text=f"Ricostruzione {i}/{len(records)}")
     return out_path
 
 
@@ -158,7 +173,8 @@ def parse_mbox_path(path: Path):
 def parse_zip_path(path: Path, depth: int = 0):
     results, warnings = [], []
     if depth > 4:
-        return results, [f"{path.name}: profondità ZIP annidato oltre il limite tecnico di sicurezza"]
+        return results, [f"{path.name}: ZIP annidato troppo in profondità"]
+
     with zipfile.ZipFile(path, "r") as zf:
         for info in zf.infolist():
             if info.is_dir():
@@ -210,93 +226,50 @@ def parse_reconstructed_path(path: Path):
 def local_splitter_component():
     html = r'''
     <style>
-      *{box-sizing:border-box}
-      body{margin:0;font-family:Arial,sans-serif;color:#17324a}
-      .box{border:1px solid #d8dee5;border-top:4px solid #b88952;border-radius:12px;padding:18px;background:white}
-      .note{background:#f2f6fa;border-left:4px solid #b88952;border-radius:8px;padding:11px 13px;margin:12px 0;color:#344b5f;font-size:14px;line-height:1.4}
-      .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0}
+      *{box-sizing:border-box} body{margin:0;font-family:Arial,sans-serif;color:#17324a}
+      .box{border:1px solid #d8dee5;border-top:4px solid #b88952;border-radius:12px;padding:16px;background:white}
+      .note{background:#f2f6fa;border-left:4px solid #b88952;border-radius:8px;padding:10px 12px;margin:10px 0;color:#344b5f;font-size:14px;line-height:1.4}
+      .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
       button{background:#12304A;color:white;border:0;border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer}
       button.secondary{background:white;color:#12304A;border:1px solid #b88952;padding:7px 10px;font-size:12px}
-      #parts{margin-top:14px;border:1px solid #e0e5ea;border-radius:10px;overflow:hidden;display:none}
-      .ph{display:grid;grid-template-columns:55px 1fr 95px 105px;background:#12304A;color:white;font-weight:700;padding:9px 10px;font-size:12px}
-      .pr{display:grid;grid-template-columns:55px 1fr 95px 105px;align-items:center;padding:8px 10px;border-top:1px solid #e8edf1;font-size:12px;gap:6px}
-      .pr:nth-child(odd){background:#f8fafb}
-      .filename{word-break:break-all}
-      .status{font-weight:700;color:#6b7780}
-      .status.ok{color:#1c7c54}
+      #parts{margin-top:12px;border:1px solid #e0e5ea;border-radius:10px;overflow:hidden;display:none;max-height:410px;overflow-y:auto}
+      .ph{position:sticky;top:0;display:grid;grid-template-columns:48px 1fr 85px 105px;background:#12304A;color:white;font-weight:700;padding:8px 9px;font-size:12px;z-index:2}
+      .pr{display:grid;grid-template-columns:48px 1fr 85px 105px;align-items:center;padding:7px 9px;border-top:1px solid #e8edf1;font-size:12px;gap:5px}
+      .pr:nth-child(odd){background:#f8fafb}.filename{word-break:break-all}.status{font-weight:700;color:#6b7780}.status.ok{color:#1c7c54}
       progress{width:100%;margin-top:8px;display:none}
-      @media(max-width:600px){.ph,.pr{grid-template-columns:42px 1fr 78px}.ph div:nth-child(4),.pr div:nth-child(4){grid-column:1/-1}.pr button{width:100%}}
+      @media(max-width:600px){.ph,.pr{grid-template-columns:38px 1fr 72px}.ph div:nth-child(4),.pr div:nth-child(4){grid-column:1/-1}.pr button{width:100%}}
     </style>
     <div class="box">
-      <h3 style="margin-top:0;color:#12304A">1. Seleziona il file grande e dividilo localmente</h3>
-      <p style="color:#465866;margin-bottom:6px">Il file originale non viene caricato su Streamlit. Il browser legge il file sul dispositivo e crea parti da circa 500 MB.</p>
-      <div class="note"><b>Dove vengono salvate?</b><br>Su iPhone/Safari: nell'app <b>File → Download</b> (iCloud Drive oppure “Su iPhone”, secondo le impostazioni Safari). Su computer, se il browser consente la scelta cartella, potrai scegliere dove salvarle; altrimenti finiscono nella cartella Download.</div>
+      <h3 style="margin-top:0;color:#12304A">1. Dividi il file grande sul dispositivo</h3>
+      <p style="color:#465866">Consigliato per iPhone: <b>100 MB per parte</b>. Il file originale non viene caricato su Streamlit.</p>
+      <div class="note"><b>iPhone:</b> le parti vengono salvate in <b>File → Download</b>. Una parte da 100 MB è molto più affidabile da caricare rispetto a 500 MB.</div>
       <input id="bigfile" type="file" style="margin:8px 0 10px;width:100%" />
       <div class="controls">
-        <label>Dimensione parte (MB): <input id="chunkmb" type="number" value="500" min="100" max="900" step="50" style="width:90px;padding:6px"></label>
-        <button id="splitbtn">Dividi e salva tutte le parti</button>
+        <label>MB per parte: <input id="chunkmb" type="number" value="100" min="50" max="250" step="25" style="width:80px;padding:6px"></label>
+        <button id="splitbtn">Dividi e salva tutte</button>
       </div>
-      <div id="status" style="margin-top:10px;color:#12304A;font-weight:700"></div>
+      <div id="status" style="margin-top:8px;color:#12304A;font-weight:700"></div>
       <progress id="prog" value="0" max="100"></progress>
-      <div id="parts">
-        <div class="ph"><div>#</div><div>Nome parte</div><div>Dimensione</div><div>Stato / Azione</div></div>
-        <div id="partrows"></div>
-      </div>
+      <div id="parts"><div class="ph"><div>#</div><div>Parte</div><div>MB</div><div>Stato</div></div><div id="partrows"></div></div>
     </div>
     <script>
-    const sleep = ms => new Promise(r => setTimeout(r, ms));
-    let selectedFile=null, currentChunk=500*1024*1024, totalParts=0;
-    function fmtBytes(n){ const u=['B','KB','MB','GB','TB']; let i=0,v=n; while(v>=1024&&i<u.length-1){v/=1024;i++;} return v.toFixed(i>1?2:1)+' '+u[i]; }
-    function partName(i){ return selectedFile.name+'.part'+String(i+1).padStart(4,'0'); }
-    function renderParts(){
-      const rows=document.getElementById('partrows'); rows.innerHTML='';
-      if(!selectedFile){document.getElementById('parts').style.display='none';return;}
-      const mb=parseInt(document.getElementById('chunkmb').value||'500',10); currentChunk=mb*1024*1024; totalParts=Math.ceil(selectedFile.size/currentChunk);
-      document.getElementById('parts').style.display='block';
-      for(let i=0;i<totalParts;i++){
-        const start=i*currentChunk,end=Math.min(start+currentChunk,selectedFile.size),size=end-start;
-        const row=document.createElement('div'); row.className='pr'; row.id='row-'+i;
-        row.innerHTML='<div>'+(i+1)+'</div><div class="filename">'+partName(i)+'</div><div>'+fmtBytes(size)+'</div><div><span class="status" id="st-'+i+'">Da creare</span><br><button class="secondary" id="btn-'+i+'" type="button">Scarica</button></div>';
-        rows.appendChild(row);
-        document.getElementById('btn-'+i).addEventListener('click',()=>downloadOne(i));
+      const sleep=ms=>new Promise(r=>setTimeout(r,ms)); let f=null,chunk=100*1024*1024,total=0;
+      function name(i){return f.name+'.part'+String(i+1).padStart(4,'0')}
+      function render(){
+        const rows=document.getElementById('partrows');rows.innerHTML='';if(!f){document.getElementById('parts').style.display='none';return;}
+        chunk=parseInt(document.getElementById('chunkmb').value||'100',10)*1024*1024; total=Math.ceil(f.size/chunk); document.getElementById('parts').style.display='block';
+        for(let i=0;i<total;i++){const s=i*chunk,e=Math.min(s+chunk,f.size),mb=((e-s)/1024/1024).toFixed(1);const row=document.createElement('div');row.className='pr';row.innerHTML='<div>'+(i+1)+'</div><div class="filename">'+name(i)+'</div><div>'+mb+'</div><div><span class="status" id="st-'+i+'">Da creare</span><br><button class="secondary" id="b-'+i+'">Scarica</button></div>';rows.appendChild(row);document.getElementById('b-'+i).onclick=()=>one(i);}
+        document.getElementById('status').textContent='Previste '+total+' parti.';
       }
-    }
-    async function downloadBlob(blob,name){
-      const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove(); await sleep(500); URL.revokeObjectURL(url);
-    }
-    async function downloadOne(i){
-      if(!selectedFile)return;
-      const start=i*currentChunk,end=Math.min(start+currentChunk,selectedFile.size),blob=selectedFile.slice(start,end),name=partName(i),st=document.getElementById('st-'+i);
-      st.textContent='Preparazione…'; await downloadBlob(blob,name); st.textContent='✅ Scaricata'; st.className='status ok';
-    }
-    document.getElementById('bigfile').addEventListener('change',e=>{
-      selectedFile=e.target.files[0]||null;
-      const status=document.getElementById('status');
-      if(selectedFile){status.textContent='File selezionato: '+selectedFile.name+' • '+fmtBytes(selectedFile.size);renderParts();}
-      else{status.textContent='';renderParts();}
-    });
-    document.getElementById('chunkmb').addEventListener('change',renderParts);
-    document.getElementById('splitbtn').addEventListener('click',async()=>{
-      if(!selectedFile){alert('Seleziona prima il file grande.');return;}
-      renderParts();
-      const status=document.getElementById('status'),prog=document.getElementById('prog');prog.style.display='block';prog.value=0;
-      let dir=null;
-      if('showDirectoryPicker' in window){try{dir=await window.showDirectoryPicker({mode:'readwrite'});}catch(e){dir=null;}}
-      for(let i=0;i<totalParts;i++){
-        const start=i*currentChunk,end=Math.min(start+currentChunk,selectedFile.size),blob=selectedFile.slice(start,end),name=partName(i),st=document.getElementById('st-'+i);
-        status.textContent='Creazione '+name+' • '+(i+1)+'/'+totalParts; st.textContent='Creazione…';
-        if(dir){const h=await dir.getFileHandle(name,{create:true});const w=await h.createWritable();await w.write(blob);await w.close();st.textContent='✅ Salvata';}
-        else{await downloadBlob(blob,name);st.textContent='✅ Scaricata';}
-        st.className='status ok';prog.value=((i+1)/totalParts)*100;await sleep(80);
-      }
-      const manifest={original_name:selectedFile.name,original_size:selectedFile.size,chunk_size:currentChunk,total_parts:totalParts,created_at:new Date().toISOString()};
-      const mblob=new Blob([JSON.stringify(manifest,null,2)],{type:'application/json'}),mname=selectedFile.name+'.manifest.json';
-      if(dir){const h=await dir.getFileHandle(mname,{create:true});const w=await h.createWritable();await w.write(mblob);await w.close();}else{await downloadBlob(mblob,mname);}
-      status.textContent='Completato: '+totalParts+' parti create. Ora le trovi in Download e puoi caricarle nell’app qui sotto.';
-    });
+      async function dl(blob,n){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=n;document.body.appendChild(a);a.click();a.remove();await sleep(350);URL.revokeObjectURL(u)}
+      async function one(i){const st=document.getElementById('st-'+i);st.textContent='Preparazione…';await dl(f.slice(i*chunk,Math.min((i+1)*chunk,f.size)),name(i));st.textContent='✅ Scaricata';st.className='status ok'}
+      document.getElementById('bigfile').onchange=e=>{f=e.target.files[0]||null;render()};document.getElementById('chunkmb').onchange=render;
+      document.getElementById('splitbtn').onclick=async()=>{if(!f){alert('Seleziona il file.');return;}render();const p=document.getElementById('prog'),s=document.getElementById('status');p.style.display='block';
+        for(let i=0;i<total;i++){s.textContent='Parte '+(i+1)+'/'+total;const st=document.getElementById('st-'+i);st.textContent='Creazione…';await dl(f.slice(i*chunk,Math.min((i+1)*chunk,f.size)),name(i));st.textContent='✅ Scaricata';st.className='status ok';p.value=(i+1)/total*100;await sleep(60)}
+        const man=new Blob([JSON.stringify({original_name:f.name,original_size:f.size,chunk_size:chunk,total_parts:total},null,2)],{type:'application/json'});await dl(man,f.name+'.manifest.json');s.textContent='Completato: '+total+' parti. Ora caricale sotto.';};
     </script>
     '''
-    components.html(html, height=720, scrolling=True)
+    components.html(html, height=680, scrolling=True)
 
 
 def render_results(ms, ws):
@@ -306,92 +279,117 @@ def render_results(ms, ws):
                 st.warning(w)
     if not ms:
         return
+
     df = core.dataframe(ms)
     total_att = sum(len(m.attachments) for m in ms)
     total_bytes = sum(len(a.content) for m in ms for a in m.attachments)
     a, b, c, d = st.columns(4)
-    a.metric("Mail elaborate", len(ms)); b.metric("Mail con allegati", sum(bool(m.attachments) for m in ms)); c.metric("Allegati estratti", total_att); d.metric("Dimensione allegati", f"{total_bytes/1024**2:.2f} MB")
+    a.metric("Mail elaborate", len(ms))
+    b.metric("Mail con allegati", sum(bool(m.attachments) for m in ms))
+    c.metric("Allegati estratti", total_att)
+    d.metric("Dimensione allegati", f"{total_bytes/1024**2:.2f} MB")
+
     st.subheader("🔎 Filtri archivio")
-    f1, f2, f3, f4 = st.columns([1.1,1.1,1.5,2])
-    dated = [m.dt.date() for m in ms if m.dt]
-    if dated:
-        mind,maxd=min(dated),max(dated); start=f1.date_input("Dal",value=mind,min_value=mind,max_value=maxd); end=f2.date_input("Al",value=maxd,min_value=mind,max_value=maxd)
-    else:
-        start=end=None; f1.caption("Date non disponibili"); f2.caption("Date non disponibili")
-    senders=sorted(x for x in df["Mittente"].dropna().unique()); sel=f3.multiselect("Mittente",senders,placeholder="Tutti i mittenti"); q=f4.text_input("Ricerca libera",placeholder="Oggetto, sintesi, allegato…").strip(); only=st.checkbox("Mostra solo mail con allegati")
-    show=df.copy()
-    if start and end: show=show[(show["DataISO"]=="")|((show["DataISO"]>=start.isoformat())&(show["DataISO"]<=end.isoformat()))]
-    if sel: show=show[show["Mittente"].isin(sel)]
-    if only: show=show[show["N. allegati"]>0]
-    if q: show=show[show.astype(str).apply(lambda x:x.str.contains(re.escape(q),case=False,na=False,regex=True)).any(axis=1)]
-    st.caption(f"Risultati visualizzati: {len(show)} su {len(df)}")
-    st.dataframe(show[["Data e ora","Mittente","Oggetto","Sintesi del contenuto","Allegati","N. allegati"]],use_container_width=True,hide_index=True,height=520)
-    st.subheader("📦 Esporta risultati filtrati")
-    e1,e2,e3,e4=st.columns(4)
-    e1.download_button("📄 Report PDF",core.pdf_bytes(show),"FinancePlus_Report_Mail.pdf","application/pdf",use_container_width=True)
-    e2.download_button("📊 Report Excel",core.xlsx_bytes(show),"FinancePlus_Report_Mail.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
-    e3.download_button("🧾 Report CSV",show.drop(columns=["DataISO"],errors="ignore").to_csv(index=False).encode("utf-8-sig"),"FinancePlus_Report_Mail.csv","text/csv",use_container_width=True)
-    e4.download_button("📎 Archivio allegati ZIP",core.attachments_zip(ms,show),"FinancePlus_Allegati_Mail.zip","application/zip",use_container_width=True)
+    q = st.text_input("Ricerca", placeholder="Mittente, oggetto, sintesi, allegato…").strip()
+    show = df.copy()
+    if q:
+        show = show[show.astype(str).apply(lambda x: x.str.contains(re.escape(q), case=False, na=False, regex=True)).any(axis=1)]
+    st.dataframe(show[["Data e ora", "Mittente", "Oggetto", "Sintesi del contenuto", "Allegati", "N. allegati"]], use_container_width=True, hide_index=True, height=520)
+
+    st.subheader("📦 Esporta")
+    e1, e2, e3, e4 = st.columns(4)
+    e1.download_button("📄 PDF", core.pdf_bytes(show), "FinancePlus_Report_Mail.pdf", "application/pdf", use_container_width=True)
+    e2.download_button("📊 Excel", core.xlsx_bytes(show), "FinancePlus_Report_Mail.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    e3.download_button("🧾 CSV", show.drop(columns=["DataISO"], errors="ignore").to_csv(index=False).encode("utf-8-sig"), "FinancePlus_Report_Mail.csv", "text/csv", use_container_width=True)
+    e4.download_button("📎 Allegati ZIP", core.attachments_zip(ms, show), "FinancePlus_Allegati_Mail.zip", "application/zip", use_container_width=True)
 
 
 def main():
-    st.set_page_config(page_title="FinancePlus | Archivio Mail",page_icon="📬",layout="wide"); core.css()
-    st.markdown('<div class="fp-head"><h1>📬 FinancePlus | Archivio Mail</h1><p>File fino a decine di GB: divisione locale in parti da ~500 MB e caricamento controllato</p></div>',unsafe_allow_html=True)
+    st.set_page_config(page_title="FinancePlus | Archivio Mail", page_icon="📬", layout="wide")
+    core.css()
+    st.markdown('<div class="fp-head"><h1>📬 FinancePlus | Archivio Mail</h1><p>Modalità iPhone ottimizzata: parti da 100 MB, caricamento progressivo e ripresa</p></div>', unsafe_allow_html=True)
 
-    mode=st.radio("Scegli il flusso",["File normale","File grande: dividi in parti"],horizontal=True)
+    mode = st.radio("Scegli il flusso", ["File normale", "File grande: dividi in parti"], horizontal=True)
 
-    if mode=="File normale":
-        files=st.file_uploader("Carica EML, MSG, MBOX o ZIP",type=["eml","msg","mbox","zip"],accept_multiple_files=True,key="normal")
-        if files and st.button("⚙️ Elabora archivio",type="primary",use_container_width=True):
-            ms,ws=[],[]; bar=st.progress(0)
-            for i,f in enumerate(files,1):
-                a,b=core.parse_upload(f.name,f.getvalue()); ms.extend(a); ws.extend(b); bar.progress(i/len(files))
-            bar.empty(); st.session_state.mails=ms; st.session_state.warns=ws
+    if mode == "File normale":
+        files = st.file_uploader("Carica EML, MSG, MBOX o ZIP", type=["eml", "msg", "mbox", "zip"], accept_multiple_files=True, key="normal")
+        if files and st.button("⚙️ Elabora archivio", type="primary", use_container_width=True):
+            ms, ws = [], []
+            for f in files:
+                a, b = core.parse_upload(f.name, f.getvalue())
+                ms.extend(a); ws.extend(b)
+            st.session_state.mails = ms; st.session_state.warns = ws
     else:
         local_splitter_component()
         st.markdown("### 2. Carica le parti nell'app")
-        upload_mode=st.radio("Come vuoi caricare le parti?",["Una parte alla volta","Seleziona tutte le parti"],horizontal=True)
+        upload_mode = st.radio("Modalità", ["Una parte alla volta — consigliata", "Seleziona tutte le parti"], horizontal=True)
 
-        if upload_mode=="Una parte alla volta":
+        if upload_mode.startswith("Una parte"):
             ensure_stage_dir()
-            key=f"single_part_{st.session_state.get('part_uploader_key',0)}"
-            one=st.file_uploader("Seleziona una parte .partXXXX",accept_multiple_files=False,key=key)
-            c1,c2=st.columns([2,1])
-            if one and c1.button("➕ Aggiungi questa parte",type="primary",use_container_width=True):
+            staged = st.session_state.get("staged_parts", {})
+            nxt = next_expected_part()
+            st.info(f"Prossima parte attesa: **part{nxt:04d}**. Le parti già completate restano salvate durante questa sessione.")
+
+            key = f"single_part_{st.session_state.get('part_uploader_key', 0)}"
+            one = st.file_uploader("Carica una parte (circa 100 MB)", accept_multiple_files=False, key=key)
+            if one is not None:
                 try:
-                    save_one_part(one)
-                    st.session_state.part_uploader_key=st.session_state.get("part_uploader_key",0)+1
+                    info = parse_part_name(one.name)
+                    if not info:
+                        raise ValueError("Il file scelto non è una parte .partXXXX")
+                    if info[1] != nxt and info[1] not in staged:
+                        st.warning(f"Attesa part{nxt:04d}; hai scelto part{info[1]:04d}. Verrà comunque salvata e potrai completare quella mancante dopo.")
+                    num, size = save_one_part(one)
+                    st.toast(f"part{num:04d} caricata: {size/1024**2:.1f} MB", icon="✅")
+                    st.session_state.part_uploader_key = st.session_state.get("part_uploader_key", 0) + 1
                     st.rerun()
-                except Exception as exc: st.error(str(exc))
-            if c2.button("🗑️ Svuota parti",use_container_width=True):
-                clear_staged_parts(); st.rerun()
-            staged=st.session_state.get("staged_parts",{})
+                except Exception as exc:
+                    st.error(str(exc))
+
+            staged = st.session_state.get("staged_parts", {})
             if staged:
-                rows=[]
-                for num,meta in sorted(staged.items()): rows.append({"Parte":f"part{int(num):04d}","File":meta["name"],"Dimensione MB":round(meta["size"]/1024**2,1)})
-                st.dataframe(rows,use_container_width=True,hide_index=True)
-                total=sum(v["size"] for v in staged.values()); st.success(f"Parti caricate: {len(staged)} • Totale: {total/1024**3:.2f} GB")
-                if st.button("🧩 Ricostruisci file ed elabora",type="primary",use_container_width=True):
-                    bar=st.progress(0,text="Controllo sequenza…")
+                rows = []
+                for num, meta in sorted(staged.items()):
+                    rows.append({"Parte": f"part{int(num):04d}", "Stato": "✅ Caricata", "Dimensione MB": round(meta["size"]/1024**2, 1), "File": meta["name"]})
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+                total = sum(v["size"] for v in staged.values())
+                st.success(f"{len(staged)} parti salvate • {total/1024**3:.2f} GB • Prossima: part{next_expected_part():04d}")
+
+                c1, c2 = st.columns([2, 1])
+                if c2.button("🗑️ Svuota parti", use_container_width=True):
+                    clear_staged_parts(); st.rerun()
+                if c1.button("🧩 Ricostruisci ed elabora", type="primary", use_container_width=True):
+                    bar = st.progress(0, text="Controllo parti…")
                     try:
-                        rebuilt=reconstruct_staged_parts_to_disk(bar); st.success(f"Ricostruito: {rebuilt.name} • {rebuilt.stat().st_size/1024**3:.2f} GB"); bar.progress(1.0,text="Analisi archivio…")
-                        ms,ws=parse_reconstructed_path(rebuilt); st.session_state.mails=ms; st.session_state.warns=ws
-                    except Exception as exc: st.error(f"Errore: {exc}")
-                    finally: bar.empty()
+                        rebuilt = reconstruct_staged_parts_to_disk(bar)
+                        bar.progress(1.0, text="Analisi archivio…")
+                        ms, ws = parse_reconstructed_path(rebuilt)
+                        st.session_state.mails = ms; st.session_state.warns = ws
+                        st.success(f"Archivio ricostruito: {rebuilt.name}")
+                    except Exception as exc:
+                        st.error(f"Impossibile ricostruire: {exc}")
+                    finally:
+                        bar.empty()
         else:
-            parts=st.file_uploader("Seleziona tutte le parti insieme",accept_multiple_files=True,key="all_parts")
+            st.warning("Su iPhone questa modalità può essere lenta con molte parti. Per archivi grandi è preferibile caricarle una alla volta.")
+            parts = st.file_uploader("Seleziona tutte le parti", accept_multiple_files=True, key="all_parts")
             if parts:
-                total=sum(getattr(f,"size",0) or 0 for f in parts); st.success(f"Parti selezionate: {len(parts)} • Totale: {total/1024**3:.2f} GB")
-            if parts and st.button("🧩 Ricostruisci tutte le parti ed elabora",type="primary",use_container_width=True):
-                bar=st.progress(0,text="Controllo sequenza…")
-                try:
-                    rebuilt=reconstruct_uploaded_parts_to_disk(parts,bar); st.success(f"Ricostruito: {rebuilt.name} • {rebuilt.stat().st_size/1024**3:.2f} GB"); bar.progress(1.0,text="Analisi archivio…")
-                    ms,ws=parse_reconstructed_path(rebuilt); st.session_state.mails=ms; st.session_state.warns=ws
-                except Exception as exc: st.error(f"Errore: {exc}")
-                finally: bar.empty()
+                total = sum(getattr(f, "size", 0) or 0 for f in parts)
+                st.caption(f"Selezionate {len(parts)} parti • {total/1024**3:.2f} GB")
+                if st.button("🧩 Ricostruisci ed elabora tutte", type="primary", use_container_width=True):
+                    bar = st.progress(0, text="Ricostruzione…")
+                    try:
+                        rebuilt = reconstruct_uploaded_parts_to_disk(parts, bar)
+                        ms, ws = parse_reconstructed_path(rebuilt)
+                        st.session_state.mails = ms; st.session_state.warns = ws
+                        st.success(f"Archivio ricostruito: {rebuilt.name}")
+                    except Exception as exc:
+                        st.error(str(exc))
+                    finally:
+                        bar.empty()
 
-    render_results(st.session_state.get("mails",[]),st.session_state.get("warns",[]))
+    render_results(st.session_state.get("mails", []), st.session_state.get("warns", []))
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
