@@ -36,6 +36,30 @@ CLIENT_SECRET_FILE = Path("client_secret.json")
 
 st.set_page_config(page_title="Archivio Mail Clienti PRO", page_icon="📥", layout="wide")
 
+
+def require_access_password() -> bool:
+    try:
+        expected = st.secrets.get("ACCESS_PASSWORD", "")
+    except Exception:
+        expected = ""
+    if not expected:
+        return True
+    if st.session_state.get("_access_ok"):
+        return True
+    st.title("🔒 Accesso protetto")
+    pwd = st.text_input("Password di accesso", type="password")
+    if st.button("Entra"):
+        if pwd == expected:
+            st.session_state["_access_ok"] = True
+            st.rerun()
+        else:
+            st.error("Password errata.")
+    return False
+
+
+if not require_access_password():
+    st.stop()
+
 CUSTOM_CSS = """
 <style>
 .main-title {font-size: 2.0rem; font-weight: 800; color: #0B3A66;}
